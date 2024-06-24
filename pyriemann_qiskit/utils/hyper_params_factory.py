@@ -1,5 +1,5 @@
 from qiskit.circuit.library import ZZFeatureMap, ZFeatureMap, PauliFeatureMap
-from qiskit.algorithms.optimizers import SPSA
+from qiskit_algorithms.optimizers import SPSA
 from qiskit.circuit.library import TwoLocal
 import inspect
 
@@ -144,9 +144,7 @@ gates = [
     "cry",
     "crz",
     "h",
-    "i",
     "id",
-    "iden",
     "rx",
     "rxx",
     "ry",

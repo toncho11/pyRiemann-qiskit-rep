@@ -5,6 +5,7 @@ in several modes quantum/classical and simulated/real
 quantum computer.
 """
 from datetime import datetime
+from pyriemann_qiskit.utils.quantum_provider import get_quantum_kernel
 from scipy.special import softmax
 import logging
 import numpy as np
@@ -21,25 +22,23 @@ from pyriemann_qiskit.utils import (
 )
 from pyriemann_qiskit.utils.distance import distance_functions
 from pyriemann_qiskit.utils.utils import is_qfunction
-from qiskit.utils import QuantumInstance
-from qiskit.utils.quantum_instance import logger
-from qiskit_ibm_provider import IBMProvider, least_busy
+from qiskit.primitives import BackendSampler
+from qiskit_ibm_runtime import QiskitRuntimeService
 from qiskit_machine_learning.algorithms import QSVC, VQC, PegasosQSVC
-from qiskit_machine_learning.kernels.quantum_kernel import QuantumKernel
 from qiskit_optimization.algorithms import (
     CobylaOptimizer,
-    #    ADMMOptimizer,
     SlsqpOptimizer,
 )
+from qiskit_algorithms.optimizers import SLSQP
 from sklearn.svm import SVC
 
 from .utils.hyper_params_factory import gen_zz_feature_map, gen_two_local, get_spsa
-from .utils import get_provider, get_devices, get_simulator
+from .utils import get_provider, get_device, get_simulator
 from .utils.distance import qdistance_logeuclid_to_convex_hull
 from joblib import Parallel, delayed
 import random
 
-logger.level = logging.WARNING
+logging.basicConfig(level=logging.WARNING)
 
 
 class QuanticClassifierBase(BaseEstimator, ClassifierMixin):
@@ -85,6 +84,8 @@ class QuanticClassifierBase(BaseEstimator, ClassifierMixin):
         Added support for multi-class classification.
     .. versionchanged:: 0.2.0
         Add seed parameter
+    .. versionchanged:: 0.3.0
+        Switch from IBMProvider to QiskitRuntimeService.
 
     Attributes
     ----------
@@ -129,8 +130,12 @@ class QuanticClassifierBase(BaseEstimator, ClassifierMixin):
             if self.q_account_token:
                 self._log("Real quantum computation will be performed")
                 if not self.q_account_token == "load_account":
-                    IBMProvider.delete_account()
-                    IBMProvider.save_account(token=self.q_account_token)
+                    QiskitRuntimeService.delete_account()
+                    QiskitRuntimeService.save_account(
+                        channel="ibm_quantum",
+                        token=self.q_account_token,
+                        overwrite=True,
+                    )
                 self._log("Getting provider...")
                 self._provider = get_provider()
             else:
@@ -198,20 +203,14 @@ class QuanticClassifierBase(BaseEstimator, ClassifierMixin):
             self._feature_map = self.gen_feature_map(n_features)
         if self.quantum:
             if not hasattr(self, "_backend"):
-                devices = get_devices(self._provider, n_features)
-                try:
-                    self._backend = least_busy(devices)
-                except Exception:
-                    self._log("Devices are all busy. Getting the first one...")
-                    self._backend = devices[0]
+                self._backend = get_device(self._provider, n_features)
             self._log("Quantum backend = ", self._backend)
             self._log("seed = ", self.seed)
-            self._quantum_instance = QuantumInstance(
+            self._quantum_instance = BackendSampler(
                 self._backend,
-                shots=self.shots,
-                seed_simulator=self.seed,
-                seed_transpiler=self.seed,
+                options={"shots": self.shots, "seed_simulator": self.seed},
             )
+            self._quantum_instance.transpile_options["seed_transpiler"] = self.seed
         self._classifier = self._init_algo(n_features)
         self._train(X, y)
         return self
@@ -315,6 +314,8 @@ class QuanticSVM(QuanticClassifierBase):
         Add seed parameter
         SVC and QSVC now compute probability (may impact performance)
         Predict is now using predict_proba with a softmax, when using QSVC.
+    .. versionchanged:: 0.3.0
+        Add use_fidelity_state_vector_kernel parameter
 
     Parameters
     ----------
@@ -351,6 +352,8 @@ class QuanticSVM(QuanticClassifierBase):
         Function generating a feature map to encode data into a quantum state.
     seed : int | None, default=None
         Random seed for the simulation
+    use_fidelity_state_vector_kernel: boolean (default=True)
+        if True, use a FidelitystatevectorKernel for simulation.
 
     See Also
     --------
@@ -391,6 +394,7 @@ class QuanticSVM(QuanticClassifierBase):
         shots=1024,
         gen_feature_map=gen_zz_feature_map(),
         seed=None,
+        use_fidelity_state_vector_kernel=True,
     ):
         QuanticClassifierBase.__init__(
             self, quantum, q_account_token, verbose, shots, gen_feature_map, seed
@@ -399,12 +403,15 @@ class QuanticSVM(QuanticClassifierBase):
         self.C = C
         self.max_iter = max_iter
         self.pegasos = pegasos
+        self.use_fidelity_state_vector_kernel = use_fidelity_state_vector_kernel
 
     def _init_algo(self, n_features):
         self._log("SVM initiating algorithm")
         if self.quantum:
-            quantum_kernel = QuantumKernel(
-                feature_map=self._feature_map, quantum_instance=self._quantum_instance
+            quantum_kernel = get_quantum_kernel(
+                self._feature_map,
+                self._quantum_instance,
+                self.use_fidelity_state_vector_kernel,
             )
             if self.pegasos:
                 self._log("[Warning] `gamma` is not supported by PegasosQSVC")
@@ -485,6 +492,11 @@ class QuanticVQC(QuanticClassifierBase):
     seed : int | None, default=None
         Random seed for the simulation.
 
+    Attributes
+    ----------
+    evaluated_values_ : list[int]
+        Training curve values.
+
     Notes
     -----
     .. versionadded:: 0.0.1
@@ -493,6 +505,8 @@ class QuanticVQC(QuanticClassifierBase):
         Added support for multi-class classification.
     .. versionchanged:: 0.2.0
         Add seed parameter
+    .. versionchanged:: 0.3.0
+        Add evaluated_values_ attribute.
 
     See Also
     --------
@@ -544,12 +558,18 @@ class QuanticVQC(QuanticClassifierBase):
     def _init_algo(self, n_features):
         self._log("VQC training...")
         var_form = self.gen_var_form(n_features)
+        self.evaluated_values_ = []
+
+        def _callback(_weights, value):
+            self.evaluated_values_.append(value)
+
         vqc = VQC(
             optimizer=self.optimizer,
             feature_map=self._feature_map,
             ansatz=var_form,
-            quantum_instance=self._quantum_instance,
+            sampler=self._quantum_instance,
             num_qubits=n_features,
+            callback=_callback,
         )
         return vqc
 
@@ -607,6 +627,8 @@ class QuanticMDM(QuanticClassifierBase):
         Add seed parameter.
         Add regularization parameter.
         Add classical_optimizer parameter.
+    .. versionchanged:: 0.3.0
+        Add qaoa_optimizer parameter.
 
     Parameters
     ----------
@@ -640,6 +662,9 @@ class QuanticMDM(QuanticClassifierBase):
         Additional post-processing to regularize means.
     classical_optimizer : OptimizationAlgorithm, default=CobylaOptimizer()
         An instance of OptimizationAlgorithm [3]_.
+    qaoa_optimizer : SciPyOptimizer, default=SLSQP()
+        An instance of a scipy optimizer to find the optimal weights for the
+        parametric circuit (ansatz).
 
     See Also
     --------
@@ -673,6 +698,7 @@ class QuanticMDM(QuanticClassifierBase):
         upper_bound=7,
         regularization=None,
         classical_optimizer=CobylaOptimizer(rhobeg=2.1, rhoend=0.000001),
+        qaoa_optimizer=SLSQP(),
     ):
         QuanticClassifierBase.__init__(
             self, quantum, q_account_token, verbose, shots, None, seed
@@ -681,6 +707,7 @@ class QuanticMDM(QuanticClassifierBase):
         self.upper_bound = upper_bound
         self.regularization = regularization
         self.classical_optimizer = classical_optimizer
+        self.qaoa_optimizer = qaoa_optimizer
 
     @staticmethod
     def _override_predict_distance(mdm):
@@ -719,7 +746,9 @@ class QuanticMDM(QuanticClassifierBase):
         if self.quantum:
             self._log("Using NaiveQAOAOptimizer")
             self._optimizer = NaiveQAOAOptimizer(
-                quantum_instance=self._quantum_instance, upper_bound=self.upper_bound
+                quantum_instance=self._quantum_instance,
+                upper_bound=self.upper_bound,
+                optimizer=self.qaoa_optimizer,
             )
         else:
             self._log("Using ClassicalOptimizer (COBYLA)")
@@ -977,6 +1006,8 @@ class QuanticNCH(QuanticClassifierBase):
     Notes
     -----
     .. versionadded:: 0.2.0
+    .. versionchanged:: 0.3.0
+        Add qaoa_optimizer parameter.
 
     Parameters
     ----------
@@ -1015,6 +1046,9 @@ class QuanticNCH(QuanticClassifierBase):
         Subsampling strategy of training set to estimate distance to hulls.
         "min" estimates hull using the n_samples_per_hull closest matrices.
         "random" estimates hull using n_samples_per_hull random matrices.
+    qaoa_optimizer : SciPyOptimizer, default=SLSQP()
+        An instance of a scipy optimizer to find the optimal weights for the
+        parametric circuit (ansatz).
 
     """
 
@@ -1032,6 +1066,7 @@ class QuanticNCH(QuanticClassifierBase):
         n_hulls_per_class=3,
         n_samples_per_hull=10,
         subsampling="min",
+        qaoa_optimizer=SLSQP(),
     ):
         QuanticClassifierBase.__init__(
             self, quantum, q_account_token, verbose, shots, None, seed
@@ -1043,6 +1078,7 @@ class QuanticNCH(QuanticClassifierBase):
         self.n_samples_per_hull = n_samples_per_hull
         self.n_jobs = n_jobs
         self.subsampling = subsampling
+        self.qaoa_optimizer = qaoa_optimizer
 
     def _init_algo(self, n_features):
         self._log("Nearest Convex Hull Classifier initiating algorithm")
@@ -1057,7 +1093,9 @@ class QuanticNCH(QuanticClassifierBase):
         if self.quantum:
             self._log("Using NaiveQAOAOptimizer")
             self._optimizer = NaiveQAOAOptimizer(
-                quantum_instance=self._quantum_instance, upper_bound=self.upper_bound
+                quantum_instance=self._quantum_instance,
+                upper_bound=self.upper_bound,
+                optimizer=self.qaoa_optimizer,
             )
         else:
             self._log("Using ClassicalOptimizer")

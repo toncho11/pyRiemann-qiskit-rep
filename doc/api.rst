@@ -17,6 +17,20 @@ Classification
     QuanticSVM
     QuanticVQC
     QuanticMDM
+    QuanticNCH
+    NearestConvexHull
+
+
+Autoencoders
+-------------
+.. _autoencoders_api:
+.. currentmodule:: pyriemann_qiskit.autoencoders
+
+.. autosummary::
+    :toctree: generated/
+    :template: class.rst
+
+    BasicQnnAutoencoder
 
 
 Pipelines
@@ -86,6 +100,8 @@ Preprocessing
     :toctree: generated/
 
     NdRobustScaler
+    Vectorizer
+    Devectorizer
 
 Filtering
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -97,7 +113,7 @@ Filtering
 
     NoDimRed
     NaiveDimRed
-    Vectorizer
+    ChannelSelection
 
 Mean
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -188,8 +204,9 @@ Quantum Provider
     :toctree: generated/
 
     get_provider
-    get_devices
+    get_device
     get_simulator
+    get_quantum_kernel
 
 
 Visualization

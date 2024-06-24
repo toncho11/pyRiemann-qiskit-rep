@@ -251,7 +251,7 @@ class OptionalWhitening(TransformerMixin, BaseEstimator):
     def transform(self, X):
         if not self.process:
             return X
-        return Whitening(dim_red={"n_components": 4}).fit_transform(X)
+        return Whitening(dim_red={"n_components": self.n_components}).fit_transform(X)
 
 
 # Create a RandomForest for baseline comparison of direct classification:
@@ -395,13 +395,13 @@ print("----Training score:----")
 print(
     f"Classical SVM: {train_score_svm:.3f}\
     \nQuantum SVM: {train_score_qsvm:.3f}\
-    \nClassical RandomForest: {train_score_rf:.3f}"
+    \nClassical RandomForest: {train_score_rf:.3f}"  # noqa: E231
 )
 print("----Testing score:----")
 print(
     f"Classical SVM: {score_svm:.3f}\
     \nQuantum SVM: {score_qsvm:.3f}\
-    \nClassical RandomForest: {score_rf:.3f}"
+    \nClassical RandomForest: {score_rf:.3f}"  # noqa: E231
 )
 
 
